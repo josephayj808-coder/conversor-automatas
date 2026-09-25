@@ -4,14 +4,14 @@ import graphviz
 import string
 
 # ==============================================================================
-# ESTRUCTURAS DE DATOS BASE
+# CONSTRUCCIÓN DE AFN-λ (THOMPSON ESTÁNDAR O CON FUSIÓN DE ESTADOS)
 # ==============================================================================
 
 class Estado:
     """
-    Modela los vértices del autómata. 
-    Usa un diccionario donde la clave es el símbolo escaneado y el valor es una 
-    lista de estados de destino, permitiendo transiciones múltiples (No-Determinismo).
+    Representa un vértice en el grafo. Las transiciones se modelan como un 
+    diccionario donde la clave es el símbolo escaneado y el valor es una lista 
+    de estados de destino, permitiendo transiciones múltiples (No-Determinismo).
     """
     def __init__(self, id_estado):
         self.id = id_estado
@@ -25,9 +25,9 @@ class Estado:
 
 class AFN:
     """
-    Representa un bloque de autómata (con un inicio y un fin).
-    Incluye un registro de 'estados_totales' para facilitar las operaciones 
-    de fusión y limpieza de nodos en la versión optimizada.
+    Estructura modular de un autómata con un inicio y un fin.
+    Mantiene un conjunto de 'estados' internos para facilitar la detección
+    de nodos entrantes/salientes requerida por la optimización de fusión.
     """
     def __init__(self, estado_inicial, estado_final, estados_totales=None):
         self.inicial = estado_inicial
@@ -42,9 +42,7 @@ class AFN:
         inicial.agregar_transicion(simbolo, final)
         return cls(inicial, final)
 
-    # --- MÉTODOS AUXILIARES PARA OPTIMIZACIÓN ---
-    # Para la sustentación: Estos métodos revisan la topología del grafo para saber 
-    # si es seguro fusionar estados y ahorrar puentes λ sin alterar la lógica.
+    # --- AYUDANTES PARA LA LÓGICA DE FUSIÓN ---
     def tiene_entrantes(self, estado):
         for e in self.estados:
             for _, dests in e.transiciones.items():
@@ -55,26 +53,21 @@ class AFN:
     def tiene_salientes(self, estado):
         return bool(estado.transiciones)
 
-    # ==============================================================================
-    # OPERACIONES REGULARES (TEOREMA DE KLEENE PARTE I OPTIMIZADO)
-    # ==============================================================================
-
     def concatenacion(self, otro_afn, fusionar=False):
         """
         Operación R.S
-        Si 'fusionar' es True, colapsa el estado final de R con el inicial de S.
-        De lo contrario, usa el método académico clásico uniendo con una transición λ.
+        Si 'fusionar' es True, intercepta y colapsa el estado final de R con el 
+        inicial de S (cero transiciones λ). Si es False, respeta el Teorema de 
+        Kleene uniéndolos con un puente λ explícito.
         """
         if fusionar and not otro_afn.tiene_entrantes(otro_afn.inicial):
             final_viejo = self.final
             inicial_otro = otro_afn.inicial
 
-            # Redirige todas las transiciones internas hacia el nodo fusionado
             for e in otro_afn.estados:
                 for s, dests in list(e.transiciones.items()):
                     e.transiciones[s] = [final_viejo if d == inicial_otro else d for d in dests]
 
-            # Transfiere las rutas de salida del nodo inicial de S al final de R
             for simbolo, destinos in inicial_otro.transiciones.items():
                 for dest in destinos:
                     final_viejo.agregar_transicion(simbolo, dest)
@@ -86,14 +79,15 @@ class AFN:
             nuevos_estados = self.estados | otro_afn.estados
             return AFN(self.inicial, otro_afn.final, nuevos_estados)
 
-    def union(self, otro_afn, gen_id):
+    def union(self, otro_afn, gen_id, fusionar=False):
         """
         Operación R U S
-        Verifica si los estados iniciales/finales de los sub-bloques están "limpios" 
-        (sin bucles). Si es así, los fusiona directamente ahorrando hasta 4 conectores λ.
+        Genera bifurcaciones paralelas. Si el modo fusión está activo, verifica 
+        si los extremos están libres de bucles para reutilizarlos directamente,
+        ahorrando hasta 4 estados vacíos en la ramificación.
         """
-        can_merge_init = not self.tiene_entrantes(self.inicial) and not otro_afn.tiene_entrantes(otro_afn.inicial)
-        can_merge_final = not self.tiene_salientes(self.final) and not otro_afn.tiene_salientes(otro_afn.final)
+        can_merge_init = fusionar and not self.tiene_entrantes(self.inicial) and not otro_afn.tiene_entrantes(otro_afn.inicial)
+        can_merge_final = fusionar and not self.tiene_salientes(self.final) and not otro_afn.tiene_salientes(otro_afn.final)
 
         if can_merge_final:
             final_target = self.final
@@ -125,13 +119,13 @@ class AFN:
         nuevos_estados = self.estados | estados_otro | {nuevo_inicial, nuevo_final}
         return AFN(nuevo_inicial, nuevo_final, nuevos_estados)
 
-    def estrella_kleene(self, gen_id):
+    def estrella_kleene(self, gen_id, fusionar=False):
         """
         Operación R*
-        Si el bloque es simple, añade el ciclo y el salto λ directamente a los 
-        nodos existentes. Si es complejo, envuelve el bloque en dos nuevos estados.
+        Crea bucles de repetición infinita y saltos directos al final. 
+        Mantiene aislamientos para proteger iteraciones internas.
         """
-        if not self.tiene_entrantes(self.inicial) and not self.tiene_salientes(self.final):
+        if fusionar and not self.tiene_entrantes(self.inicial) and not self.tiene_salientes(self.final):
             self.final.agregar_transicion('λ', self.inicial)
             self.inicial.agregar_transicion('λ', self.final)
             return self
@@ -145,13 +139,13 @@ class AFN:
             nuevos_estados = self.estados | {nuevo_inicial, nuevo_final}
             return AFN(nuevo_inicial, nuevo_final, nuevos_estados)
 
-    def clausura_positiva(self, gen_id):
+    def clausura_positiva(self, gen_id, fusionar=False):
         """
         Operación R+
-        Idéntica a Kleene, pero omite el salto espontáneo directo de inicio a fin, 
-        obligando a que se lea la expresión interna al menos una vez.
+        Matemáticamente equivalente a R.R*. Omite el bypass directo de la 
+        cadena vacía, forzando a la máquina a procesar al menos un ciclo.
         """
-        if not self.tiene_salientes(self.final):
+        if fusionar and not self.tiene_salientes(self.final):
             self.final.agregar_transicion('λ', self.inicial)
             return self
         else:
@@ -161,13 +155,13 @@ class AFN:
             nuevos_estados = self.estados | {nuevo_final}
             return AFN(self.inicial, nuevo_final, nuevos_estados)
 
-    def opcional(self, gen_id):
+    def opcional(self, gen_id, fusionar=False):
         """
         Operación R?
-        Habilita un puente λ directo hacia la salida para que el bloque pueda 
-        ser ignorado (0 repeticiones) pero no permite ciclos de retorno (no itera).
+        Habilita un puente λ directo hacia la salida para saltarse el bloque, 
+        pero no añade el puente de retorno (no itera).
         """
-        if not self.tiene_entrantes(self.inicial) and not self.tiene_salientes(self.final):
+        if fusionar and not self.tiene_entrantes(self.inicial) and not self.tiene_salientes(self.final):
             self.inicial.agregar_transicion('λ', self.final)
             return self
         else:
@@ -194,9 +188,9 @@ OPERADORES_SOPORTADOS = {'|', '*', '+', '?', '(', ')', '.'}
 
 def validar_regex(regex):
     """
-    Filtro de seguridad exhaustivo. 
-    Verifica que la sintaxis sea matemáticamente viable antes de procesar 
-    (ej. previene errores por operadores iterativos seguidos o paréntesis rotos).
+    Filtro de seguridad exhaustivo (Whitelist). 
+    Previene errores algorítmicos deteniendo la ejecución si hay secuencias
+    matemáticamente inválidas (ej. operadores unarios sin operando, paréntesis rotos).
     """
     regex_limpia = regex.replace(" ", "")
     if not regex_limpia:
@@ -214,15 +208,15 @@ def validar_regex(regex):
     if regex_limpia[-1] in {'.', '|'}:
         raise ValueError(f"La expresión no puede terminar con el operador '{regex_limpia[-1]}'.")
 
-    # Verificación de secuencias ilegales de operadores
     for i in range(len(regex_limpia) - 1):
         c1, c2 = regex_limpia[i], regex_limpia[i + 1]
         if c1 in {'.', '|'} and c2 in {'.', '|', '*', '+', '?', ')'}:
             raise ValueError(f"Secuencia no válida de operadores: '{c1}{c2}'.")
         if c1 == '(' and c2 in {'.', '|', '*', '+', '?'}:
             raise ValueError(f"Secuencia no válida: '{c1}{c2}'.")
+        if c1 == '(' and c2 == ')':
+            raise ValueError("No se permiten paréntesis vacíos '()'.")
 
-    # Paréntesis balanceados
     balance = 0
     for c in regex_limpia:
         if c == '(':
@@ -236,9 +230,8 @@ def validar_regex(regex):
 
 def formatear_regex(regex):
     """
-    Normalización de entrada: inyecta el operador de concatenación explícita '.' 
-    entre caracteres adyacentes o tras operadores iterativos para que el algoritmo 
-    Shunting Yard sepa exactamente dónde aplicar la operación de concatenación.
+    Normalización de entrada: inyecta puntos de concatenación implícita 
+    para que el algoritmo Shunting Yard sepa exactamente cuándo concatenar.
     """
     regex = regex.replace(" ", "")
     res = ""
@@ -257,9 +250,9 @@ def formatear_regex(regex):
 
 def infija_a_postfija(regex):
     """
-    Algoritmo de Shunting Yard.
-    Convierte la notación humana (infija: a|b) a postfija (ab|) basada en la 
-    precedencia matemática (1. Iteradores, 2. Concatenación, 3. Unión).
+    Algoritmo de Shunting Yard. 
+    Convierte notación humana a postfija respetando la precedencia matemática 
+    (1. Iteradores, 2. Concatenación, 3. Unión).
     """
     precedencia = {'*': 3, '+': 3, '?': 3, '.': 2, '|': 1}
     salida = []
@@ -288,10 +281,11 @@ def infija_a_postfija(regex):
 
     return salida
 
-def construir_afn(postfija, fusionar_concatenacion=False):
+def construir_afn(postfija, fusionar_estados=False):
     """
-    Máquina de pila que recorre la cadena postfija de izquierda a derecha, 
-    instancia los autómatas básicos y ejecuta las funciones matemáticas de ensamblaje.
+    Máquina de pila que evalúa linealmente la cadena postfija.
+    Extrae bloques previos, les aplica las fusiones o puentes λ, 
+    y retorna el super-autómata resultante a la cima de la pila.
     """
     pila = []
     gen_id = generador_estados().__next__
@@ -303,29 +297,29 @@ def construir_afn(postfija, fusionar_concatenacion=False):
             if not pila:
                 raise ValueError("Error en operador '*'")
             afn = pila.pop()
-            pila.append(afn.estrella_kleene(gen_id))
+            pila.append(afn.estrella_kleene(gen_id, fusionar=fusionar_estados))
         elif char == '+':
             if not pila:
                 raise ValueError("Error en operador '+'")
             afn = pila.pop()
-            pila.append(afn.clausura_positiva(gen_id))
+            pila.append(afn.clausura_positiva(gen_id, fusionar=fusionar_estados))
         elif char == '?':
             if not pila:
                 raise ValueError("Error en operador '?'")
             afn = pila.pop()
-            pila.append(afn.opcional(gen_id))
+            pila.append(afn.opcional(gen_id, fusionar=fusionar_estados))
         elif char == '.':
             if len(pila) < 2:
                 raise ValueError("Error en operador de concatenación '.'")
             afn2 = pila.pop()
             afn1 = pila.pop()
-            pila.append(afn1.concatenacion(afn2, fusionar=fusionar_concatenacion))
+            pila.append(afn1.concatenacion(afn2, fusionar=fusionar_estados))
         elif char == '|':
             if len(pila) < 2:
                 raise ValueError("Error en operador de unión '|'")
             afn2 = pila.pop()
             afn1 = pila.pop()
-            pila.append(afn1.union(afn2, gen_id))
+            pila.append(afn1.union(afn2, gen_id, fusionar=fusionar_estados))
 
     return pila[0]
 
@@ -334,31 +328,35 @@ def construir_afn(postfija, fusionar_concatenacion=False):
 # ==============================================================================
 
 def obtener_mapa_estados(afn):
-    # Recorrido en profundidad (DFS) para extraer la lista completa de nodos y arcos.
+    """
+    Recorrido ITERATIVO explícito (sin recursión profunda). 
+    Protege el programa de fallas de memoria al mapear cadenas inusualmente largas.
+    """
     mapa = {}
     transiciones = []
     alfabeto = set()
 
-    def dfs(estado):
+    pila = [afn.inicial]
+    while pila:
+        estado = pila.pop()
         if estado.id in mapa:
-            return
+            continue
         mapa[estado.id] = estado
         for simbolo, destinos in estado.transiciones.items():
             if simbolo != 'λ':
                 alfabeto.add(simbolo)
             for dest in destinos:
                 transiciones.append((estado.id, simbolo, dest.id))
-                dfs(dest)
+                if dest.id not in mapa:
+                    pila.append(dest)
 
-    dfs(afn.inicial)
     return mapa, transiciones, sorted(list(alfabeto))
 
 def lambda_clausura(estados_ids, mapa_estados):
     """
-    Para la sustentación: Calcula Λ[q] (Teorema 2.7.1).
-    Halla el conjunto de todos los estados a los que se puede llegar desde un nodo 
-    origen utilizando cero, una o más transiciones λ. Es la base para eliminar 
-    el no-determinismo espontáneo.
+    Calcula Λ[q]. 
+    Identifica todos los nodos alcanzables asimilando cero o múltiples saltos λ,
+    esencial para eliminar el No-Determinismo espontáneo.
     """
     pila = list(estados_ids)
     clausura = set(estados_ids)
@@ -375,7 +373,6 @@ def lambda_clausura(estados_ids, mapa_estados):
     return clausura
 
 def delta_directo(estados_ids, simbolo, mapa_estados):
-    """Calcula los estados alcanzables consumiendo estrictamente un símbolo del alfabeto."""
     alcanzables = set()
     for eid in estados_ids:
         obj = mapa_estados.get(eid)
@@ -386,15 +383,12 @@ def delta_directo(estados_ids, simbolo, mapa_estados):
 
 def afn_lambda_a_afn(afn):
     """
-    Implementa la demostración constructiva del Teorema 2.7.1.
-    Elimina los conectores λ del grafo reasignando los vectores de lectura 
-    directamente hacia los destinos de la λ-clausura y redefiniendo los 
-    estados de aceptación.
+    Elimina conectores λ redirigiendo vectores de lectura reales hacia los
+    destinos finales dictados por la λ-clausura.
     """
     mapa_estados, _, alfabeto = obtener_mapa_estados(afn)
     closures = {s: frozenset(lambda_clausura({s}, mapa_estados)) for s in mapa_estados}
 
-    # Representante canónico para ciclos de λ mutuamente alcanzables
     rep = {}
     for s in mapa_estados:
         ciclo = {t for t in mapa_estados if s in closures[t] and t in closures[s]}
@@ -415,7 +409,6 @@ def afn_lambda_a_afn(afn):
                 for dest_reach in closures[dest]:
                     trans_afn.add((renombrar[r], a, renombrar[rep[dest_reach]]))
 
-    # Filtrar únicamente estados alcanzables desde el inicial
     alcanzables_desde_init = {init_state}
     pila = [init_state]
     while pila:
@@ -428,7 +421,6 @@ def afn_lambda_a_afn(afn):
     trans_finales = [t for t in trans_afn if t[0] in alcanzables_desde_init and t[2] in alcanzables_desde_init]
     finales_filtrados = [f for f in final_states if f in alcanzables_desde_init]
 
-    # Re-etiquetado limpio consecutivo (q0, q1, ...)
     estados_activos = sorted(list(alcanzables_desde_init))
     mapeo_limpio = {old: f"q{i}" for i, old in enumerate(estados_activos)}
 
@@ -440,10 +432,10 @@ def afn_lambda_a_afn(afn):
 
 def afn_lambda_a_afd(afn):
     """
-    Construcción de Subconjuntos (Teorema 2.5.1).
-    Transforma el autómata no determinista en uno determinista aglutinando 
-    estados superpuestos en "macro-estados". Cada macro-estado en el AFD 
-    representa una combinación posible de caminos paralelos en el AFN original.
+    Construcción de Subconjuntos.
+    Transforma el AFN agrupando todas las ramificaciones simultáneas en 
+    "macro-estados", erradicando el No-Determinismo y demostrando la 
+    equivalencia de los lenguajes regulares.
     """
     mapa_estados, _, alfabeto = obtener_mapa_estados(afn)
     start_clausura = lambda_clausura({afn.inicial.id}, mapa_estados)
@@ -491,10 +483,10 @@ def afn_lambda_a_afd(afn):
 
 def minimizar_afd(id_init, finales, transiciones, alfabeto, macro_estados):
     """
-    Algoritmo de partición de estados equivalentes (Algoritmo de Moore).
-    Divide inicialmente los estados en dos particiones lógicas: Finales y No Finales.
-    Luego refina las particiones revisando si sus vectores de salida apuntan al 
-    mismo grupo. Los estados que son indistinguibles se fusionan.
+    Algoritmo de Moore (Partición de estados equivalentes).
+    Refina particiones (Finales vs. No Finales) evaluando si los vectores 
+    de salida apuntan al mismo clúster lógico. Fusiona nodos indistinguibles 
+    garantizando el AFD mínimo posible.
     """
     estados_set = set(macro_estados.keys())
     finales_set = set(finales)
@@ -561,8 +553,8 @@ def minimizar_afd(id_init, finales, transiciones, alfabeto, macro_estados):
 
 def simular_afd(id_init, finales, transiciones, cadena):
     """
-    Rastrea el recorrido lógico de una cadena ingresada por el usuario 
-    verificando su validez contra el AFD mínimo.
+    Rastrea el procesamiento de una cadena en tiempo real evaluando 
+    la matriz de transición del AFD Mínimo.
     """
     delta = {}
     for orig, sym, dest in transiciones:
@@ -595,16 +587,14 @@ def simular_afd(id_init, finales, transiciones, cadena):
 
 def generar_grafo_dot(id_init, finales, transiciones, estados=None, es_lambda=False):
     """
-    Convierte la matriz matemática de transición en un diagrama visual 
-    (digrafo etiquetado) utilizando atributos visuales como círculos dobles 
-    para los estados finales.
+    Renderiza el autómata respetando la semántica visual estándar 
+    (círculo doble para estados de aceptación, coloración dinámica).
     """
     dot = graphviz.Digraph()
     dot.attr(rankdir='LR', size='12,8', bgcolor='transparent')
     dot.attr('node', fontname='Helvetica', fontsize='11', shape='circle', style='filled', fillcolor='#F8F9FA', color='#343A40')
     dot.attr('edge', fontname='Helvetica', fontsize='10', color='#495057')
 
-    # Nodo apuntador de inicio
     dot.node('start', shape='point', style='invis')
     dot.edge('start', id_init, label='', color='#2E7D32', penwidth='1.8')
 
@@ -616,14 +606,13 @@ def generar_grafo_dot(id_init, finales, transiciones, estados=None, es_lambda=Fa
 
     for eid in sorted(list(todos_los_estados)):
         if eid in finales:
-            dot.node(eid, shape='doublecircle', fillcolor='#E8F5E9' if eid == id_init else '#FFEBEE', 
+            dot.node(eid, shape='doublecircle', fillcolor='#E8F5E9' if eid == id_init else '#FFEBEE',
                      color='#2E7D32' if eid == id_init else '#C62828', penwidth='2.0')
         elif eid == id_init:
             dot.node(eid, shape='circle', fillcolor='#E8F5E9', color='#2E7D32', penwidth='2.0')
         else:
             dot.node(eid, shape='circle')
 
-    # Agrupar transiciones paralelas para no amontonar flechas
     trans_agrupadas = {}
     for orig, sym, dest in transiciones:
         clave = (orig, dest)
@@ -655,16 +644,22 @@ y minimización por el algoritmo de Moore. Soporta concatenación implícita (`a
 """)
 
 st.sidebar.header("Configuración del AFN-λ")
-modo_concatenacion = st.sidebar.radio(
-    "Concatenación de Estados:",
+modo_construccion = st.sidebar.radio(
+    "Construcción del AFN-λ:",
     [
-        "Thompson Estándar (con λ)", 
+        "Thompson Estándar (con λ)",
         "Thompson con Fusión (sin λ)"
     ],
     index=0,
-    help="• Thompson Estándar: Genera q0 -a-> q1 -λ-> q2 -b-> q3 para 'ab' o 'a.b'.\n• Thompson con Fusión: Une q1 y q2 en un solo estado q0 -a-> q1 -b-> q2."
+    help=(
+        "• Thompson Estándar: cada operación crea "
+        "estados nuevos y los conecta mediante transiciones λ explícitas, tal como "
+        "lo define la construcción clásica de Thompson.\n"
+        "• Thompson con Fusión: reutiliza estados cuando es seguro hacerlo, evitando "
+        "λ redundantes y produciendo un autómata más compacto."
+    )
 )
-fusionar_concatenacion = (modo_concatenacion == "Thompson con Fusión (sin λ)")
+fusionar_estados = (modo_construccion == "Thompson con Fusión (sin λ)")
 
 col_input, col_ejemplos = st.columns([3, 1])
 
@@ -677,29 +672,29 @@ with col_ejemplos:
 with col_input:
     regex_input = st.text_input("Ingresa la Expresión Regular:", value=ejemplo)
 
-if regex_input:
+if not regex_input:
+    st.warning("Por favor, ingresa una expresión regular.")
+else:
     try:
         validar_regex(regex_input)
         regex_formateada = formatear_regex(regex_input)
         postfija = infija_a_postfija(regex_formateada)
-        afn = construir_afn(postfija, fusionar_concatenacion=fusionar_concatenacion)
+        afn = construir_afn(postfija, fusionar_estados=fusionar_estados)
 
         mapa_estados, trans_lambda, alfabeto = obtener_mapa_estados(afn)
         lambdas_totales = [t for t in trans_lambda if t[1] == 'λ']
 
         tab1, tab2, tab3, tab4 = st.tabs([
-            "1. AFN-λ", 
-            "2. AFN (Sin λ)", 
+            "1. AFN-λ",
+            "2. AFN (Sin λ)",
             "3. AFD (Subconjuntos)",
             "4. AFD Mínimo & Simulador"
         ])
 
-        # ======================================================================
-        # TAB 1: AFN-λ OPTIMIZADO
-        # ======================================================================
         with tab1:
             st.subheader("1. AFN-λ (Construcción de Thompson)")
-            
+            st.caption(f"Modo activo: **{modo_construccion}**")
+
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total Estados", len(mapa_estados))
             m2.metric("Transiciones Totales", len(trans_lambda))
@@ -727,9 +722,6 @@ if regex_input:
                 dot_lambda = generar_grafo_dot(afn.inicial.id, [afn.final.id], trans_lambda, mapa_estados.keys(), es_lambda=True)
                 st.graphviz_chart(dot_lambda, use_container_width=True)
 
-        # ======================================================================
-        # TAB 2: AFN SIN LAMBDAS
-        # ======================================================================
         with tab2:
             st.subheader("2. AFN Canónico (Sin Transiciones λ)")
             init_afn, finales_afn, trans_afn, alf = afn_lambda_a_afn(afn)
@@ -752,16 +744,13 @@ if regex_input:
                     df_afn.loc[orig, sym] = dest if val == "∅" else f"{val}, {dest}"
 
                 st.dataframe(df_afn, use_container_width=True)
-                st.info("Construido mediante λ-clausura sin duplicación de ciclos λ.")
+                st.info("Construido mediante clausura-λ sin duplicación de ciclos λ.")
 
             with col2:
                 st.markdown("#### Grafo del AFN (Sin λ)")
                 dot_afn = generar_grafo_dot(init_afn, finales_afn, trans_afn, estados_unicos_afn)
                 st.graphviz_chart(dot_afn, use_container_width=True)
 
-        # ======================================================================
-        # TAB 3: AFD (SUBCONJUNTOS)
-        # ======================================================================
         with tab3:
             st.subheader("3. AFD (Construcción de Subconjuntos)")
             init_afd, finales_afd, trans_afd, alf, macro_est = afn_lambda_a_afd(afn)
@@ -798,9 +787,6 @@ if regex_input:
                 dot_afd = generar_grafo_dot(init_afd, finales_afd, trans_afd, macro_est.keys())
                 st.graphviz_chart(dot_afd, use_container_width=True)
 
-        # ======================================================================
-        # TAB 4: AFD MÍNIMO & SIMULADOR
-        # ======================================================================
         with tab4:
             st.subheader("4. AFD Mínimo & Simulador de Cadenas")
 
@@ -854,5 +840,7 @@ if regex_input:
                     })
                 st.dataframe(pd.DataFrame(traza_df), use_container_width=True, hide_index=True)
 
+    except ValueError as e:
+        st.error(f"Error de validación: {e}")
     except Exception as e:
-        st.error(f"Error procesando la expresión regular: {e}")
+        st.error(f"Ocurrió un error inesperado al procesar la expresión: {e}")
